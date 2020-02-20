@@ -41,6 +41,7 @@ metadata {
         attribute "lastTempUpdate", "date"
         attribute "maxUpdateInterval", "number"
         attribute "preEmergencyMode", "string"
+        attribute "thermostatOperatingState", "string"
 	}
 
 }
@@ -90,17 +91,19 @@ def evaluateMode() {
     if (maxInterval > 180) maxinterval = 180
     maxInterval = maxInterval * 1000 * 60 //convert maxUpdateInterval (in minutes) to milliseconds
     
-    log.debug "now=$now, lastUpdate=$lastUpdate, maxInterval=$maxInterval"
+    log.debug "now=$now, lastUpdate=$lastUpdate, maxInterval=$maxInterval, heatingSetpoint=$heatingSetpoint, coolingSetpoint=$coolingSetpoint, temp=$temp"
     
-    if (! (mode in ["emergency stop", "off"]) && now - lastUpdate > maxInterval ) {
+    if (! (mode in ["emergency stop", "off"]) && now - lastUpdate >= maxInterval ) {
         log.info("maxUpdateInterval exceeded. Setting emergencyStop mode")
         sendEvent(name: "preEmergencyMode", value: mode)
         sendEvent(name: "thermostatMode", value: "emergency stop")
+        runIn(2, 'evaluateMode')
         return
-    } else if (mode == "emergency stop" && device.currentValue("preEmergencyMode")) {
+    } else if (mode == "emergency stop" && now - lastUpdate < maxInterval && device.currentValue("preEmergencyMode")) {
         log.info("Autorecovered from emergencyStop. Resetting to previous mode.")
         sendEvent(name: "thermostatMode", value: device.currentValue("preEmergencyMode"))
         sendEvent(name: "preEmergencyMode", value: "")
+        runIn(2, 'evaluateMode')
         return
     }
     
@@ -109,38 +112,28 @@ def evaluateMode() {
 		return
 	}
 	   
-	log.debug "evaluateMode() / threshold=$threshold, mode=$mode,state=$current"
-	
-	def heating = false
-	def cooling = false
-	def idle = false
+    def callFor = "idle"
+    
+    if (mode in ["heat","emergency heat"]) {
+        sendEvent(name: "thermostatSetpoint", value: heatingSetpoint)
+        if ( (heatingSetpoint - temp) >= threshold) callFor = "heating"
+    } else if (mode == "cool") {
+        sendEvent(name: "thermostatSetpoint", value: coolingSetpoint)
+        if ( (temp - coolingSetpoint) >= threshold) callFor = "cooling"
 
-	if (mode in ["heat","emergency heat","auto"]) {
-		if (heatingSetpoint - temp >= threshold) {
-			heating = true
-			sendEvent(name: "thermostatOperatingState", value: "heating")
-		}
-		else if (temp - heatingSetpoint >= threshold) {
-			idle = true
-		}
-		sendEvent(name: "thermostatSetpoint", value: heatingSetpoint)
-	}
-	if (mode in ["cool","auto"]) {
-		if (temp - coolingSetpoint >= threshold) {
-			cooling = true
-			sendEvent(name: "thermostatOperatingState", value: "cooling")
-		}
-		else if (coolingSetpoint - temp >= threshold && !heating) {
-			idle = true
-		}
-		sendEvent(name: "thermostatSetpoint", value: coolingSetpoint)
-	}
-	else {
-		sendEvent(name: "thermostatSetpoint", value: heatingSetpoint)
-	}
-	if (idle && !heating && !cooling) {
-		sendEvent(name: "thermostatOperatingState", value: "idle")
-	}
+    } else if (mode == "auto") {
+        if (temp > coolingSetpoint) { //time to cool
+            sendEvent(name: "thermostatSetpoint", value: coolingSetpoint)
+            if ( (temp - coolingSetpoint) >= threshold) callFor = "cooling"
+
+        } else { //time to heat
+            sendEvent(name: "thermostatSetpoint", value: heatingSetpoint)
+            if ( (heatingSetpoint - temp) >= threshold) callFor = "heating"
+
+        }
+    }
+	log.debug "evaluateMode() : threshold=$threshold, actingMode=$mode, origState=$current, newState = $callFor"
+    sendEvent(name: "thermostatOperatingState", value: callFor)
 }
 
 def setHeatingSetpoint(degreesF){
@@ -154,14 +147,13 @@ def setHeatingSetpoint(Double degreesF) {
 		log.debug "setHeatingSetpoint is ignoring out of range request ($degreesF)."
 		return
 	}
-	log.debug "In setHeatingSetpoint"
 	log.debug "setHeatingSetpoint($degreesF)"
 	sendEvent(name: "heatingSetpoint", value: degreesF)
 	runIn(2,'evaluateMode')
 }
 
 def setCoolingSetpoint(degreesF){
-	setHeatingSetpoint(defreesF.toDouble())
+	setCoolingSetpoint(defreesF.toDouble())
 }
 
 def setCoolingSetpoint(Double degreesF) {
